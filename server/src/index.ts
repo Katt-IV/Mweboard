@@ -25,16 +25,24 @@ const apiRoot = '/api';
 type AuthedRequest = Request & { uid?: string };
 const now = () => Timestamp.now();
 
-app.use(cors({ origin: (process.env.CLIENT_ORIGIN ?? 'http://localhost:4200').split(','), allowedHeaders: ['Authorization', 'Content-Type'], methods: ['GET','POST','PATCH','DELETE','OPTIONS'] }));
+const clientOrigins = (process.env.CLIENT_ORIGIN ?? 'http://localhost:4200,http://127.0.0.1:4200,http://localhost:4201,http://127.0.0.1:4201').split(',').map(origin => origin.trim()).filter(Boolean);
+app.use(cors({ origin: clientOrigins, allowedHeaders: ['Authorization', 'Content-Type'], methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'] }));
 // Keep raw bytes for Meta's HMAC signature verification.
 app.use('/webhook', express.raw({ type: 'application/json' }));
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '8mb' }));
 
 async function authenticate(req: AuthedRequest, res: Response, next: NextFunction) {
   const match = req.header('authorization')?.match(/^Bearer (.+)$/);
   if (!match) return res.status(401).json({ error: 'A Firebase ID token is required.' });
   try { const token = await getAuth(adminApp).verifyIdToken(match[1]); req.uid = token.uid; next(); }
-  catch { return res.status(401).json({ error: 'Invalid or expired Firebase ID token.' }); }
+  catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn('Firebase ID token verification failed:', message);
+    if (/EACCES|ENETUNREACH|ECONNRESET|ECONNREFUSED|ENOTFOUND|fetch failed/i.test(message)) {
+      return res.status(503).json({ error: 'The API server cannot reach Firebase Auth to verify this token.' });
+    }
+    return res.status(401).json({ error: 'Invalid or expired Firebase ID token.' });
+  }
 }
 app.get('/health', (_req, res) => res.json({ ok: true }));
 app.use(apiRoot, authenticate);
@@ -82,7 +90,7 @@ app.delete(`${apiRoot}/subscribers/:id`, async (req: AuthedRequest, res) => {
 });
 
 async function getSettings(uid: string) { const doc = await db.collection('settings').doc(uid).get(); return doc.data() ?? {}; }
-async function sendTemplate(uid: string, to: string, templateName: string, language: string) {
+async function getWhatsAppConfig(uid: string) {
   const settings = await getSettings(uid); const phoneNumberId = String(settings['phoneNumberId'] ?? process.env.WHATSAPP_PHONE_NUMBER_ID ?? '');
   const whatsappToken = process.env.WHATSAPP_TOKEN?.trim();
   const missingVariables: string[] = [];
@@ -91,10 +99,36 @@ async function sendTemplate(uid: string, to: string, templateName: string, langu
   if (missingVariables.length) {
     throw new Error(`WhatsApp is not configured. Missing environment variable(s): ${missingVariables.join(', ')}.`);
   }
-  const graphVersion = process.env.GRAPH_API_VERSION ?? 'v25.0';
-  const response = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`, { method:'POST', headers:{ Authorization:`Bearer ${whatsappToken}`, 'Content-Type':'application/json' }, body:JSON.stringify({ messaging_product:'whatsapp', to, type:'template', template:{ name:templateName, language:{ code:language } } }) });
-  const payload = await response.json() as { messages?: Array<{ id: string }>; error?: { message?: string } };
-  if (!response.ok) throw new Error(payload.error?.message ?? `WhatsApp API returned ${response.status}`);
+  return { phoneNumberId, whatsappToken, graphVersion: process.env.GRAPH_API_VERSION ?? 'v25.0' };
+}
+async function graphPost(uid: string, endpoint: string, requestBody: unknown) {
+  const { phoneNumberId, whatsappToken, graphVersion } = await getWhatsAppConfig(uid);
+  const response = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/${endpoint}`, { method:'POST', headers:{ Authorization:`Bearer ${whatsappToken}`, 'Content-Type':'application/json' }, body:JSON.stringify(requestBody) });
+  const responsePayload = await response.json() as { messages?: Array<{ id: string }>; error?: { message?: string } };
+  if (!response.ok) throw new Error(responsePayload.error?.message ?? `WhatsApp API returned ${response.status}`);
+  return responsePayload;
+}
+async function uploadCampaignImage(uid: string, bytes: Buffer, mimeType: string, fileName: string) {
+  const { phoneNumberId, whatsappToken, graphVersion } = await getWhatsAppConfig(uid);
+  const form = new FormData();
+  form.append('messaging_product', 'whatsapp');
+  form.append('type', mimeType);
+  form.append('file', new Blob([bytes], { type: mimeType }), fileName);
+  const response = await fetch(`https://graph.facebook.com/${graphVersion}/${phoneNumberId}/media`, { method:'POST', headers:{ Authorization:`Bearer ${whatsappToken}` }, body:form });
+  const payload = await response.json() as { id?: string; error?: { message?: string } };
+  if (!response.ok || !payload.id) throw new Error(payload.error?.message ?? `WhatsApp media upload returned ${response.status}`);
+  return payload.id;
+}
+async function sendCampaignMessage(uid: string, to: string, campaign: Campaign) {
+  let message: Record<string, unknown>;
+  if (campaign.imageMediaId) {
+    message = { messaging_product:'whatsapp', to, type:'image', image:{ id:campaign.imageMediaId, ...(campaign.messageText ? { caption:campaign.messageText } : {}) } };
+  } else if (campaign.messageText) {
+    message = { messaging_product:'whatsapp', to, type:'text', text:{ body:campaign.messageText, preview_url:false } };
+  } else {
+    message = { messaging_product:'whatsapp', to, type:'template', template:{ name:campaign.templateName, language:{ code:campaign.language } } };
+  }
+  const payload = await graphPost(uid, 'messages', message);
   return payload.messages?.[0]?.id ?? '';
 }
 app.put(`${apiRoot}/settings`, async (req: AuthedRequest, res) => {
@@ -106,23 +140,39 @@ app.get(`${apiRoot}/settings`, async (req: AuthedRequest, res) => { const s = aw
 app.post(`${apiRoot}/test-message`, async (req: AuthedRequest, res) => {
   const { to, templateName = 'hello_world', language = 'en_US' } = req.body ?? {};
   if (!validPhone(to) || typeof templateName !== 'string' || !templateName.trim()) return res.status(400).json({error:'A valid E.164 number and approved template name are required.'});
-  try { const wamid = await sendTemplate(uidOf(req), to, templateName.trim(), language); res.json({wamid}); }
+  try { const wamid = await graphPost(uidOf(req), 'messages', { messaging_product:'whatsapp', to, type:'template', template:{ name:templateName.trim(), language:{ code:language } } }); res.json({wamid:wamid.messages?.[0]?.id ?? ''}); }
   catch (error) { res.status(502).json({error: error instanceof Error ? error.message : 'Message sending failed.'}); }
 });
 
-interface Campaign { ownerUid:string; name:string; templateName:string; language:string; audienceTags:string[]; scheduledAt:Timestamp|null; status:string; sent:number; delivered:number; read:number; failed:number; createdAt:Timestamp }
+interface Campaign { ownerUid:string; name:string; templateName?:string; language:string; messageText?:string; imageMediaId?:string; audienceTags:string[]; scheduledAt:Timestamp|null; status:string; sent:number; delivered:number; read:number; failed:number; createdAt:Timestamp }
 app.get(`${apiRoot}/campaigns`, async (req: AuthedRequest, res) => {
   const docs = await db.collection('campaigns').where('ownerUid','==',uidOf(req)).orderBy('createdAt','desc').limit(100).get();
   res.json(docs.docs.map(d => ({id:d.id,...d.data()})));
 });
 app.post(`${apiRoot}/campaigns`, async (req: AuthedRequest, res) => {
-  const {name,templateName,language='en_US',audienceTags=[],scheduledAt}=req.body ?? {};
-  if (typeof name !== 'string' || !name.trim() || typeof templateName !== 'string' || !templateName.trim()) return res.status(400).json({error:'Campaign name and template name are required.'});
+  const {name,templateName,language='en_US',audienceTags=[],scheduledAt,messageText,imageDataUrl,imageName='campaign-image'}=req.body ?? {};
+  if (typeof name !== 'string' || !name.trim()) return res.status(400).json({error:'Campaign name is required.'});
+  const cleanMessage = typeof messageText === 'string' ? messageText.trim() : '';
+  const customMessage = Boolean(cleanMessage || imageDataUrl);
+  if (customMessage && cleanMessage.length > (imageDataUrl ? 1024 : 4096)) return res.status(400).json({error:imageDataUrl?'Image captions must be 1,024 characters or fewer.':'Messages must be 4,096 characters or fewer.'});
+  if (!customMessage && (typeof templateName !== 'string' || !templateName.trim())) return res.status(400).json({error:'A campaign message or approved template name is required.'});
   const scheduleDate=scheduledAt?new Date(scheduledAt):null;
   if(scheduleDate && Number.isNaN(scheduleDate.getTime()))return res.status(400).json({error:'scheduledAt must be a valid date.'});
+  let imageMediaId: string | undefined;
+  if (imageDataUrl) {
+    if (typeof imageDataUrl !== 'string') return res.status(400).json({error:'The image upload is invalid.'});
+    const match = imageDataUrl.match(/^data:(image\/(?:jpeg|png));base64,([A-Za-z0-9+/]+={0,2})$/);
+    if (!match) return res.status(400).json({error:'Choose a JPEG or PNG image.'});
+    const bytes = Buffer.from(match[2], 'base64');
+    if (!bytes.length || bytes.length > 5 * 1024 * 1024) return res.status(400).json({error:'Images must be no larger than 5 MB.'});
+    try { imageMediaId = await uploadCampaignImage(uidOf(req), bytes, match[1], typeof imageName === 'string' ? imageName.slice(0, 128) : 'campaign-image'); }
+    catch (error) { return res.status(502).json({error:error instanceof Error?error.message:'Image upload failed.'}); }
+  }
   const scheduled = scheduleDate ? Timestamp.fromDate(scheduleDate) : null;
-  const data: Campaign = { ownerUid:uidOf(req),name:name.trim(),templateName:templateName.trim(),language:String(language),audienceTags:cleanTags(audienceTags),scheduledAt:scheduled,status:scheduled?'scheduled':'draft',sent:0,delivered:0,read:0,failed:0,createdAt:now() };
-  const ref=await db.collection('campaigns').add(data); res.status(201).json({id:ref.id,...data});
+  const data: Campaign = { ownerUid:uidOf(req),name:name.trim(),...(customMessage?{messageText:cleanMessage}: {templateName:templateName.trim()}),...(imageMediaId?{imageMediaId}:{}),language:String(language),audienceTags:cleanTags(audienceTags),scheduledAt:customMessage?(scheduled??now()):scheduled,status:customMessage||scheduled?'scheduled':'draft',sent:0,delivered:0,read:0,failed:0,createdAt:now() };
+  const ref=await db.collection('campaigns').add(data);
+  if (customMessage && !scheduleDate) void runCampaign(ref);
+  res.status(201).json({id:ref.id,...data});
 });
 app.get(`${apiRoot}/campaigns/:id/messages`, async (req: AuthedRequest, res) => {
   const campaign = await db.collection('campaigns').doc(paramId(req.params['id'])).get();
@@ -155,7 +205,7 @@ async function runCampaign(ref: FirebaseFirestore.DocumentReference) {
       const messageRef=ref.collection('messages').doc(target.id);
       const previousMessage=await messageRef.get();if(previousMessage.exists && previousMessage.get('status')!=='queued')continue;
       try {
-        const wamid=await sendTemplate(campaign.ownerUid,target.get('phone'),campaign.templateName,campaign.language);
+        const wamid=await sendCampaignMessage(campaign.ownerUid,target.get('phone'),campaign);
         await messageRef.set({ownerUid:campaign.ownerUid,phone:target.get('phone'),wamid,status:'sent',createdAt:now(),sentAt:now()});
         await ref.update({sent:FieldValue.increment(1)});
       } catch(error) {
