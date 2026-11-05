@@ -1,0 +1,11 @@
+{
+  "indexes": [
+    { "collectionGroup": "subscribers", "queryScope": "COLLECTION", "fields": [ { "fieldPath": "ownerUid", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" } ] },
+    { "collectionGroup": "subscribers", "queryScope": "COLLECTION", "fields": [ { "fieldPath": "ownerUid", "order": "ASCENDING" }, { "fieldPath": "optedIn", "order": "ASCENDING" } ] },
+    { "collectionGroup": "campaigns", "queryScope": "COLLECTION", "fields": [ { "fieldPath": "ownerUid", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" } ] },
+    { "collectionGroup": "campaigns", "queryScope": "COLLECTION", "fields": [ { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "scheduledAt", "order": "ASCENDING" } ] },
+    { "collectionGroup": "messages", "queryScope": "COLLECTION_GROUP", "fields": [ { "fieldPath": "ownerUid", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "ASCENDING" } ] },
+    { "collectionGroup": "messages", "queryScope": "COLLECTION_GROUP", "fields": [ { "fieldPath": "wamid", "order": "ASCENDING" } ] }
+  ],
+  "fieldOverrides": []
+}
