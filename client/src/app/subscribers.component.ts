@@ -1,33 +1,21 @@
 import { AfterViewInit, Component, OnInit, ViewChild, inject } from '@angular/core';
-import { Router, RouterLink } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
-import { MatMenuModule } from '@angular/material/menu';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTableDataSource, MatTableModule } from '@angular/material/table';
 import { MatPaginator, MatPaginatorModule } from '@angular/material/paginator';
-import { AuthService } from './auth.service';
 import { Subscriber, SubscriberInput, SubscribersService } from './subscribers.service';
 import { ConfirmDeleteDialogComponent, SubscriberDialogComponent } from './subscriber-dialog.component';
 
 @Component({
   standalone: true,
-  imports: [RouterLink, MatButtonModule, MatMenuModule, MatDialogModule, MatFormFieldModule, MatInputModule, MatSelectModule, MatTableModule, MatPaginatorModule],
+  imports: [MatButtonModule, MatDialogModule, MatFormFieldModule, MatInputModule, MatSelectModule, MatTableModule, MatPaginatorModule],
   template: `
-    <header class="navbar">
-      <nav aria-label="Main navigation">
-        <a routerLink="/dashboard" class="brand">Dashboard</a>
-        <a routerLink="/subscribers" routerLinkActive="active" class="nav-link">Subscribers</a>
-        <a routerLink="/settings" routerLinkActive="active" class="nav-link">Settings</a>
-      </nav>
-      <button mat-button [matMenuTriggerFor]="accountMenu">Account</button>
-      <mat-menu #accountMenu="matMenu"><button mat-menu-item (click)="logout()">Log out</button></mat-menu>
-    </header>
     <main class="page">
       <div class="heading">
-        <div><h1>Subscribers</h1><p>Manage contacts and their WhatsApp consent.</p></div>
+        <div><p class="eyebrow">AUDIENCE</p><h1>Subscribers</h1><p>Manage contacts and their WhatsApp consent.</p></div>
         <div class="actions">
           <input #csvInput hidden type="file" accept=".csv,text/csv" (change)="importCsv($event)">
           <button mat-stroked-button (click)="csvInput.click()" [disabled]="importing">Import CSV</button>
@@ -38,11 +26,11 @@ import { ConfirmDeleteDialogComponent, SubscriberDialogComponent } from './subsc
       @if (loadError) { <p class="error" role="alert">{{ loadError }}</p> }
       <section class="panel">
         <div class="filters">
-          <mat-form-field appearance="outline" class="search">
+          <mat-form-field appearance="fill" class="search">
             <mat-label>Search name, phone, or tag</mat-label>
             <input matInput (input)="search($any($event.target).value)">
           </mat-form-field>
-          <mat-form-field appearance="outline" class="tag-filter">
+          <mat-form-field appearance="fill" class="tag-filter">
             <mat-label>Filter by tag</mat-label>
             <mat-select [(value)]="selectedTag" (selectionChange)="applyFilters()">
               <mat-option value="">All tags</mat-option>
@@ -59,7 +47,7 @@ import { ConfirmDeleteDialogComponent, SubscriberDialogComponent } from './subsc
             <ng-container matColumnDef="actions"><th mat-header-cell *matHeaderCellDef>Actions</th><td mat-cell *matCellDef="let row"><button mat-button (click)="edit(row)">Edit</button><button mat-button color="warn" (click)="remove(row)">Delete</button></td></ng-container>
             <tr mat-header-row *matHeaderRowDef="columns"></tr>
             <tr mat-row *matRowDef="let row; columns: columns"></tr>
-            <tr class="mat-mdc-row" *matNoDataRow><td class="mat-mdc-cell empty" [attr.colspan]="columns.length">{{ loading ? 'Loading subscribers…' : 'No subscribers found.' }}</td></tr>
+            <tr class="mat-mdc-row" *matNoDataRow><td class="mat-mdc-cell empty" [attr.colspan]="columns.length">@if (loading) { <div class="skeleton-lines" aria-label="Loading subscribers"><i></i><i></i><i></i></div> } @else { No subscribers found. Add a subscriber or import a CSV to get started. }</td></tr>
           </table>
         </div>
         <mat-paginator [pageSizeOptions]="[10, 25, 50]" [pageSize]="10" showFirstLastButtons aria-label="Select subscriber page"></mat-paginator>
@@ -67,21 +55,12 @@ import { ConfirmDeleteDialogComponent, SubscriberDialogComponent } from './subsc
     </main>
   `,
   styles: [`
-    :host { display:block; min-height:100vh; background:#f7f8fa; color:#202124; font-family:Arial,sans-serif; }
-    .navbar { height:64px; display:flex; align-items:center; justify-content:space-between; padding:0 32px; background:white; border-bottom:1px solid #e5e7eb; }
-    nav { display:flex; align-items:center; gap:24px; } a { color:inherit; text-decoration:none; } .brand { font-weight:700; } .nav-link { color:#667085; } .nav-link.active { color:#3f51b5; font-weight:600; }
-    .page { max-width:1200px; margin:42px auto; padding:0 24px; } .heading { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:22px; }
-    h1 { margin:0; font-size:28px; } .heading p { color:#667085; margin:8px 0 0; } .actions { display:flex; gap:10px; } .panel { padding:20px; background:white; border:1px solid #e5e7eb; border-radius:10px; }
-    .filters { display:flex; gap:14px; } .search { flex:1; } .tag-filter { width:220px; } .table-wrap { overflow:auto; } .subscriber-table { width:100%; min-width:720px; }
-    th { font-weight:600; color:#475467; } .empty { text-align:center; padding:28px; color:#667085; } .summary { padding:12px 16px; color:#166534; background:#ecfdf3; border-radius:6px; } .error { color:#b42318; }
-    @media(max-width:650px) { .navbar { padding:0 16px; } .page { margin:26px auto; padding:0 14px; } .heading { align-items:flex-start; flex-direction:column; } .filters { flex-direction:column; gap:0; } .tag-filter { width:100%; } }
+    :host{display:block;color:var(--text)}.page{max-width:1200px;margin:0 auto}.heading{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px}.eyebrow{margin:0 0 7px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:1.3px}h1{margin:0;font-size:26px}.heading p:not(.eyebrow){color:var(--muted);margin:8px 0 0;font-size:12px}.actions{display:flex;gap:10px}.panel{padding:20px;background:var(--surface);border:1px solid var(--border);border-radius:16px}.filters{display:flex;gap:14px}.search{flex:1}.tag-filter{width:220px}.table-wrap{overflow:auto}.subscriber-table{width:100%;min-width:720px}.empty{text-align:center;padding:28px;color:var(--muted)}.summary{padding:12px 16px;color:var(--success);background:var(--success-bg);border-radius:10px}.error{color:var(--danger)}.skeleton-lines{max-width:440px;margin:auto;display:grid;gap:9px}.skeleton-lines i{height:12px;border-radius:6px;background:linear-gradient(90deg,var(--elevated),#3a414a,var(--elevated));background-size:200% 100%;animation:shimmer 1.2s infinite}.skeleton-lines i:nth-child(2){width:84%}.skeleton-lines i:nth-child(3){width:65%}@keyframes shimmer{to{background-position:-200% 0}}@media(max-width:650px){.heading{align-items:flex-start;flex-direction:column}.filters{flex-direction:column;gap:0}.tag-filter{width:100%}.actions{flex-wrap:wrap}}
   `],
 })
 export class SubscribersComponent implements OnInit, AfterViewInit {
   private readonly service = inject(SubscribersService);
   private readonly dialog = inject(MatDialog);
-  private readonly auth = inject(AuthService);
-  private readonly router = inject(Router);
   @ViewChild(MatPaginator) paginator!: MatPaginator;
   readonly columns = ['name', 'phone', 'tags', 'optedIn', 'actions'];
   readonly dataSource = new MatTableDataSource<Subscriber>([]);
@@ -204,5 +183,4 @@ export class SubscribersComponent implements OnInit, AfterViewInit {
     return rows;
   }
 
-  async logout() { await this.auth.signOut(); await this.router.navigate(['/login']); }
 }
