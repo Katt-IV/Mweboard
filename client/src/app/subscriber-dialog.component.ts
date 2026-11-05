@@ -14,18 +14,18 @@ import { Subscriber, SubscriberInput, SubscribersService } from './subscribers.s
     <h2 mat-dialog-title>{{ data ? 'Edit subscriber' : 'Add subscriber' }}</h2>
     <form [formGroup]="form" (ngSubmit)="save()">
       <mat-dialog-content class="fields">
-        <mat-form-field appearance="outline">
+        <mat-form-field appearance="fill">
           <mat-label>Name</mat-label>
           <input matInput formControlName="name" autocomplete="name">
           @if (form.controls.name.hasError('required')) { <mat-error>Name is required.</mat-error> }
         </mat-form-field>
-        <mat-form-field appearance="outline">
+        <mat-form-field appearance="fill">
           <mat-label>Phone (E.164)</mat-label>
           <input matInput formControlName="phone" placeholder="+9627XXXXXXXX" autocomplete="tel">
           @if (form.controls.phone.hasError('required')) { <mat-error>Phone number is required.</mat-error> }
           @if (form.controls.phone.hasError('pattern')) { <mat-error>Use E.164 format, for example +9627XXXXXXXX.</mat-error> }
         </mat-form-field>
-        <mat-form-field appearance="outline">
+        <mat-form-field appearance="fill">
           <mat-label>Tags</mat-label>
           <input matInput formControlName="tags" placeholder="vip, new customer">
           <mat-hint>Separate tags with commas.</mat-hint>
