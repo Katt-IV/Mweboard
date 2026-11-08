@@ -1,6 +1,8 @@
+// Access rules for owner-scoped application data; server Admin SDK operations bypass these checks.
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Subscribers remain scoped to their owner for all existing client operations.
     match /subscribers/{id} {
       allow read, delete: if request.auth != null
         && resource.data.ownerUid == request.auth.uid;
@@ -9,6 +11,50 @@ service cloud.firestore {
       allow update: if request.auth != null
         && resource.data.ownerUid == request.auth.uid
         && request.resource.data.ownerUid == request.auth.uid;
+    }
+
+    // Campaign metrics are server-maintained; clients can create or edit only campaign setup fields.
+    match /campaigns/{id} {
+      allow read: if request.auth != null
+        && resource.data.ownerUid == request.auth.uid;
+      allow create: if request.auth != null
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.keys().hasAll([
+          'ownerUid', 'name', 'templateName', 'language', 'audienceTags',
+          'scheduledAt', 'status', 'createdAt'
+        ])
+        && request.resource.data.status in ['draft', 'scheduled']
+        && request.resource.data.keys().hasOnly([
+          'ownerUid', 'name', 'templateName', 'language', 'audienceTags',
+          'scheduledAt', 'status', 'createdAt'
+        ]);
+      allow update: if request.auth != null
+        && resource.data.ownerUid == request.auth.uid
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name', 'templateName', 'language', 'audienceTags', 'scheduledAt'
+        ]);
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if request.auth != null
+          && get(/databases/$(database)/documents/campaigns/$(id)).data.ownerUid == request.auth.uid;
+        allow write: if false;
+      }
+    }
+
+    // Server-written daily counters. Clients can only read stats docs whose
+    // ownerUid field matches the signed-in user (queries must filter on ownerUid).
+    // Only the server (Admin SDK) writes stats, so client writes are blocked.
+    match /stats/{statsId} {
+      allow read: if request.auth != null
+        && resource.data.ownerUid == request.auth.uid;
+      allow write: if false;
+    }
+
+    // Wamid mappings are used only by the trusted server to route Meta receipts.
+    match /wamids/{wamid} {
+      allow read, write: if false;
     }
   }
 }
