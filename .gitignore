@@ -58,3 +58,10 @@ server/Mweboard_auth.json
 *.json.key
 server/.env
 .env
+
+# Generated Angular caches and Firebase emulator state
+**/.angular/cache/
+/.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log

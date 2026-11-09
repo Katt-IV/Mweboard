@@ -22,6 +22,7 @@ export interface DashboardCampaign {
   name: string;
   audience: string;
   scheduledFor: string;
+  scheduledAt: Date | null;
   sent: number;
   delivered: number;
   read: number;
@@ -63,6 +64,15 @@ function displayDate(value: unknown): string {
     if (date instanceof Date && !Number.isNaN(date.getTime())) return date.toLocaleDateString();
   }
   return '—';
+}
+
+function timestampDate(value: unknown): Date | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (typeof value === 'object' && value !== null && 'toDate' in value && typeof value.toDate === 'function') {
+    const date = value.toDate();
+    return date instanceof Date && !Number.isNaN(date.getTime()) ? date : null;
+  }
+  return null;
 }
 
 /**
@@ -168,6 +178,7 @@ export class DashboardService {
           name: typeof data['name'] === 'string' ? data['name'] : 'Untitled campaign',
           audience: tags.length ? tags.join(', ') : 'All subscribers',
           scheduledFor: displayDate(data['scheduledAt']),
+          scheduledAt: timestampDate(data['scheduledAt']),
           sent: Number(data['sent'] ?? 0),
           delivered: Number(data['delivered'] ?? 0),
           read: Number(data['read'] ?? 0),
@@ -209,9 +220,11 @@ export class DashboardService {
    */
   async getRecentActivity(): Promise<DashboardActivity[]> {
     const campaigns = collection(this.firestore, 'campaigns');
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     const snapshot = await getDocs(query(
       campaigns,
       where('ownerUid', '==', this.currentUid()),
+      where('createdAt', '>=', sevenDaysAgo),
       orderBy('createdAt', 'desc'),
       limit(5),
     ));
