@@ -8,10 +8,11 @@ import { MatTableDataSource, MatTableModule } from '@angular/material/table';
 import { MatPaginator, MatPaginatorModule } from '@angular/material/paginator';
 import { Subscriber, SubscriberInput, SubscribersService } from './subscribers.service';
 import { ConfirmDeleteDialogComponent, SubscriberDialogComponent } from './subscriber-dialog.component';
+import { ErrorMessageComponent } from './error-message.component';
 
 @Component({
   standalone: true,
-  imports: [MatButtonModule, MatDialogModule, MatFormFieldModule, MatInputModule, MatSelectModule, MatTableModule, MatPaginatorModule],
+  imports: [MatButtonModule, MatDialogModule, MatFormFieldModule, MatInputModule, MatSelectModule, MatTableModule, MatPaginatorModule, ErrorMessageComponent],
   template: `
     <main class="page">
       <div class="heading">
@@ -23,7 +24,8 @@ import { ConfirmDeleteDialogComponent, SubscriberDialogComponent } from './subsc
         </div>
       </div>
       @if (summary) { <p class="summary" role="status">{{ summary }}</p> }
-      @if (loadError) { <p class="error" role="alert">{{ loadError }}</p> }
+      @if (operationError) { <app-error-message [code]="6003" [message]="operationError" /> }
+      @if (loadError) { <app-error-message [code]="6001" [message]="loadError" /> }
       <section class="panel">
         <div class="filters">
           <mat-form-field appearance="fill" class="search">
@@ -70,6 +72,7 @@ export class SubscribersComponent implements OnInit, AfterViewInit {
   importing = false;
   loadError = '';
   summary = '';
+  operationError = '';
 
   constructor() {
     this.dataSource.filterPredicate = (row, rawFilter) => {
@@ -117,8 +120,9 @@ export class SubscribersComponent implements OnInit, AfterViewInit {
   remove(row: Subscriber) {
     this.dialog.open(ConfirmDeleteDialogComponent, { width: '380px' }).afterClosed().subscribe(async confirmed => {
       if (!confirmed) return;
+      this.operationError = '';
       try { await this.service.delete(row.id); this.summary = 'Subscriber deleted.'; await this.refresh(); }
-      catch (error) { this.summary = error instanceof Error ? error.message : 'Could not delete subscriber.'; }
+      catch (error) { this.operationError = error instanceof Error ? error.message : 'Could not delete subscriber.'; }
     });
   }
 
@@ -128,6 +132,7 @@ export class SubscribersComponent implements OnInit, AfterViewInit {
     if (!file) return;
     this.importing = true;
     this.summary = '';
+    this.operationError = '';
     let imported = 0;
     let skipped = 0;
     try {
@@ -137,7 +142,7 @@ export class SubscribersComponent implements OnInit, AfterViewInit {
       const phoneIndex = header.indexOf('phone');
       const tagsIndex = header.indexOf('tags');
       if (nameIndex < 0 || phoneIndex < 0 || tagsIndex < 0) {
-        this.summary = 'CSV must include name, phone, and tags columns.';
+        this.operationError = 'CSV must include name, phone, and tags columns.';
         return;
       }
       for (const row of records) {
@@ -156,7 +161,7 @@ export class SubscribersComponent implements OnInit, AfterViewInit {
       this.summary = `CSV import complete: ${imported} imported, ${skipped} skipped.`;
       await this.refresh();
     } catch (error) {
-      this.summary = error instanceof Error ? `CSV import failed: ${error.message}` : 'CSV import failed.';
+      this.operationError = error instanceof Error ? `CSV import failed: ${error.message}` : 'CSV import failed.';
     } finally { this.importing = false; input.value = ''; }
   }
 

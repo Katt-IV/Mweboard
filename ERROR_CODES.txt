@@ -1,0 +1,43 @@
+Mweboard client error codes
+==========================
+
+Campaigns
+---------
+1001  Campaign input or send failed. Check the form values, API response, and WhatsApp configuration.
+1002  The scheduled-campaign API/Firestore query failed.
+1003  Campaign history could not be loaded or searched.
+1004  A scheduled campaign could not be refreshed, rescheduled, or cancelled.
+
+Account
+-------
+2001  Current password was rejected during password change.
+2002  New password does not meet Firebase password requirements.
+2003  Password change requires a recent sign-in. Reauthenticate and retry.
+2004  Password change failed for another authentication or network reason.
+3001  Account deletion reauthentication failed or was cancelled.
+3002  Account deletion API could not be reached.
+3003  Account deletion failed on the server.
+3004  The current sign-in provider cannot be reauthenticated by this app.
+
+Sign-in
+-------
+4001  Sign-in or account creation failed. See the message shown beside the code.
+4002  Password reset email could not be sent.
+
+Dashboard
+---------
+5001  Subscriber totals could not be loaded.
+5002  Campaign totals, delivery data, or recent campaign rows could not be loaded.
+5003  Dashboard message statistics could not be loaded.
+5004  Recent activity could not be loaded.
+5005  Scheduled campaigns for the calendar could not be loaded.
+
+Subscribers
+-----------
+6001  Subscriber list could not be loaded.
+6002  Subscriber create or update failed.
+6003  Subscriber delete or CSV import failed.
+
+Appearance
+----------
+7001  The browser could not enter or exit fullscreen mode.

@@ -10,7 +10,7 @@ export const firebaseTokenInterceptor: HttpInterceptorFn = (request, next) => {
   const isApiRequest = requestUrl.origin === baseUrl.origin
     && requestUrl.pathname.startsWith(`${baseUrl.pathname.replace(/\/$/, '')}/`);
 
-  if (!isApiRequest) return next(request);
+  if (!isApiRequest || request.headers.has('Authorization')) return next(request);
 
   const user = inject(Auth).currentUser;
   if (!user) return next(request);

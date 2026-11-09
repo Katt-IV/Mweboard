@@ -3,6 +3,7 @@ import { AppShellComponent } from './app-shell.component';
 import { authGuard, guestGuard } from './auth.guard';
 
 export const routes: Routes = [
+  { path: '', pathMatch: 'full', redirectTo: 'dashboard' },
   { path: 'login', canActivate: [guestGuard], loadComponent: () => import('./login.component').then(m => m.LoginComponent) },
   { path: '', component: AppShellComponent, canActivate: [authGuard], children: [
     { path: 'dashboard', loadComponent: () => import('./dashboard.component').then(m => m.DashboardComponent) },
@@ -11,6 +12,5 @@ export const routes: Routes = [
     { path: 'campaigns', loadComponent: () => import('./placeholder.component').then(m => m.CampaignsComponent) },
     { path: 'messages', loadComponent: () => import('./placeholder.component').then(m => m.MessagesComponent) },
   ] },
-  { path: '', pathMatch: 'full', redirectTo: 'dashboard' },
   { path: '**', redirectTo: 'dashboard' },
 ];

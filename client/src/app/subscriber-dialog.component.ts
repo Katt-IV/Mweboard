@@ -6,10 +6,11 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatCheckboxModule } from '@angular/material/checkbox';
 import { Subscriber, SubscriberInput, SubscribersService } from './subscribers.service';
+import { ErrorMessageComponent } from './error-message.component';
 
 @Component({
   standalone: true,
-  imports: [ReactiveFormsModule, MatDialogModule, MatButtonModule, MatFormFieldModule, MatInputModule, MatCheckboxModule],
+  imports: [ReactiveFormsModule, MatDialogModule, MatButtonModule, MatFormFieldModule, MatInputModule, MatCheckboxModule, ErrorMessageComponent],
   template: `
     <h2 mat-dialog-title>{{ data ? 'Edit subscriber' : 'Add subscriber' }}</h2>
     <form [formGroup]="form" (ngSubmit)="save()">
@@ -31,7 +32,7 @@ import { Subscriber, SubscriberInput, SubscribersService } from './subscribers.s
           <mat-hint>Separate tags with commas.</mat-hint>
         </mat-form-field>
         <mat-checkbox formControlName="optedIn">Subscriber has consented to receive WhatsApp messages</mat-checkbox>
-        @if (error) { <p class="error" role="alert">{{ error }}</p> }
+        @if (error) { <app-error-message [code]="6002" [message]="error" /> }
       </mat-dialog-content>
       <mat-dialog-actions align="end">
         <button mat-button type="button" mat-dialog-close>Cancel</button>

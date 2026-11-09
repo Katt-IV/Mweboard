@@ -7,7 +7,7 @@ import cron from 'node-cron';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { applicationDefault, cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { FieldValue, getFirestore, Timestamp } from 'firebase-admin/firestore';
+import { FieldPath, FieldValue, getFirestore, Timestamp } from 'firebase-admin/firestore';
 
 const serverDirectory = resolve(__dirname, '..');
 loadEnv({ path: resolve(serverDirectory, '.env') });
@@ -23,7 +23,7 @@ const db = getFirestore(adminApp);
 const app = express();
 const port = Number(process.env.PORT ?? 3000);
 const apiRoot = '/api';
-type AuthedRequest = Request & { uid?: string };
+type AuthedRequest = Request & { uid?: string; authTime?: number };
 type DailyMetric = 'sent' | 'delivered' | 'read' | 'failed';
 
 /**
@@ -34,19 +34,58 @@ const now = () => Timestamp.now();
 
 const clientOrigins = (process.env.CLIENT_ORIGIN ?? 'http://localhost:4200,http://127.0.0.1:4200,http://localhost:4201,http://127.0.0.1:4201').split(',').map(origin => origin.trim()).filter(Boolean);
 app.use(cors({ origin: clientOrigins, allowedHeaders: ['Authorization', 'Content-Type'], methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'] }));
+app.disable('x-powered-by');
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
 // Keep raw bytes for Meta's HMAC signature verification.
 app.use('/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json({ limit: '8mb' }));
 
+function isFirebaseNetworkError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /EACCES|ENETUNREACH|ECONNRESET|ECONNREFUSED|ENOTFOUND|fetch failed/i.test(message);
+}
+
+function firebaseNetworkDiagnostic(error: unknown): string {
+  const details: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && typeof current === 'object' && current !== null; depth++) {
+    if ('code' in current && typeof current.code === 'string') details.push(current.code);
+    if ('syscall' in current && typeof current.syscall === 'string') details.push(current.syscall);
+    if ('hostname' in current && typeof current.hostname === 'string') details.push(current.hostname);
+    current = 'cause' in current ? current.cause : null;
+  }
+  return details.length ? details.join(' / ') : 'unclassified network error';
+}
+
+async function verifyIdTokenWithNetworkRetry(token: string, checkRevoked = false) {
+  try {
+    return await getAuth(adminApp).verifyIdToken(token, checkRevoked);
+  } catch (error) {
+    if (!isFirebaseNetworkError(error)) throw error;
+    await new Promise(resolve => setTimeout(resolve, 250));
+    return getAuth(adminApp).verifyIdToken(token, checkRevoked);
+  }
+}
+
 async function authenticate(req: AuthedRequest, res: Response, next: NextFunction) {
   const match = req.header('authorization')?.match(/^Bearer (.+)$/);
   if (!match) return res.status(401).json({ error: 'A Firebase ID token is required.' });
-  try { const token = await getAuth(adminApp).verifyIdToken(match[1]); req.uid = token.uid; next(); }
+  try { const token = await verifyIdTokenWithNetworkRetry(match[1]); req.uid = token.uid; req.authTime = token.auth_time; next(); }
   catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn('Firebase ID token verification failed:', message);
-    if (/EACCES|ENETUNREACH|ECONNRESET|ECONNREFUSED|ENOTFOUND|fetch failed/i.test(message)) {
-      return res.status(503).json({ error: 'The API server cannot reach Firebase Auth to verify this token.' });
+    if (isFirebaseNetworkError(error)) {
+      res.setHeader('Retry-After', '2');
+      return res.status(503).json({
+        error: 'The API server cannot reach Firebase Auth to verify this token.',
+        diagnostic: firebaseNetworkDiagnostic(error),
+      });
     }
     return res.status(401).json({ error: 'Invalid or expired Firebase ID token.' });
   }
@@ -57,6 +96,25 @@ const uidOf = (req: AuthedRequest) => req.uid!;
 const paramId = (value: string | string[]) => Array.isArray(value) ? value[0] ?? '' : value;
 const validPhone = (phone: unknown): phone is string => typeof phone === 'string' && /^\+[1-9]\d{7,14}$/.test(phone);
 const cleanTags = (tags: unknown) => Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === 'string').slice(0, 30) : [];
+const campaignCreateBuckets = new Map<string, { start: number; count: number }>();
+function limitCampaignCreates(req: AuthedRequest, res: Response, next: NextFunction): void {
+  const uid = uidOf(req);
+  const windowMs = 60_000;
+  const start = Math.floor(Date.now() / windowMs) * windowMs;
+  const key = `${uid}:${start}`;
+  const bucket = campaignCreateBuckets.get(key) ?? { start, count: 0 };
+  if (bucket.count >= 3) {
+    res.setHeader('Retry-After', String(Math.max(1, Math.ceil((start + windowMs - Date.now()) / 1000))));
+    res.status(429).json({ error: 'Campaign creation is temporarily limited. Please try again in a minute.' });
+    return;
+  }
+  bucket.count++;
+  campaignCreateBuckets.set(key, bucket);
+  if (campaignCreateBuckets.size > 5000) {
+    for (const [entry, value] of campaignCreateBuckets) if (value.start + windowMs <= Date.now()) campaignCreateBuckets.delete(entry);
+  }
+  next();
+}
 
 /**
  * Builds a stats document reference and UTC date key for one event timestamp.
@@ -245,21 +303,162 @@ app.get(`${apiRoot}/campaigns`, async (req: AuthedRequest, res) => {
   res.json(docs.docs.map(d => ({id:d.id,...d.data()})));
 });
 
+/** Returns compact scheduled campaign rows without downloading message bodies. */
+app.get(`${apiRoot}/campaigns/scheduled`, async (req: AuthedRequest, res) => {
+  const requestedLimit = typeof req.query['limit'] === 'string' ? Number(req.query['limit']) : 100;
+  const pageSize = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(100, Math.floor(requestedLimit))) : 100;
+  const docs = await db.collection('campaigns')
+    .where('ownerUid', '==', uidOf(req))
+    .orderBy('createdAt', 'desc')
+    .select('name', 'status', 'sent', 'scheduledAt')
+    .limit(pageSize)
+    .get();
+  res.json(docs.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+});
+
+/** Reschedules an owned campaign that has not started sending. */
+app.patch(`${apiRoot}/campaigns/:id/schedule`, async (req: AuthedRequest, res) => {
+  const scheduledAt = new Date(req.body?.scheduledAt);
+  if (Number.isNaN(scheduledAt.getTime()) || scheduledAt.getTime() <= Date.now()) {
+    return res.status(400).json({ error: 'Choose a schedule time in the future.' });
+  }
+  const ref = db.collection('campaigns').doc(paramId(req.params['id']));
+  const result = await db.runTransaction(async transaction => {
+    const campaign = await transaction.get(ref);
+    if (!campaign.exists || campaign.get('ownerUid') !== uidOf(req)) return 'not-found' as const;
+    if (campaign.get('status') !== 'scheduled') return 'already-started' as const;
+    transaction.update(ref, { scheduledAt: Timestamp.fromDate(scheduledAt), status: 'scheduled' });
+    return 'updated' as const;
+  });
+  if (result === 'not-found') return res.sendStatus(404);
+  if (result === 'already-started') return res.status(409).json({ error: 'This campaign has already started and can no longer be rescheduled.' });
+  res.sendStatus(204);
+});
+
+/** Cancels an owned campaign only while it remains scheduled. */
+app.delete(`${apiRoot}/campaigns/:id`, async (req: AuthedRequest, res) => {
+  const ref = db.collection('campaigns').doc(paramId(req.params['id']));
+  const result = await db.runTransaction(async transaction => {
+    const campaign = await transaction.get(ref);
+    if (!campaign.exists || campaign.get('ownerUid') !== uidOf(req)) return 'not-found' as const;
+    if (campaign.get('status') !== 'scheduled') return 'already-started' as const;
+    transaction.delete(ref);
+    return 'deleted' as const;
+  });
+  if (result === 'not-found') return res.sendStatus(404);
+  if (result === 'already-started') return res.status(409).json({ error: 'This campaign has already started and can no longer be cancelled.' });
+  res.sendStatus(204);
+});
+
+/**
+ * Returns a cursor-paginated, newest-first campaign history for the authenticated owner.
+ * Search is a case-insensitive substring match on campaign names and document IDs.
+ */
+app.get(`${apiRoot}/campaigns/history`, async (req: AuthedRequest, res) => {
+  const requestedLimit = typeof req.query['limit'] === 'string' ? Number(req.query['limit']) : 30;
+  const pageSize = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(50, Math.floor(requestedLimit))) : 30;
+  const search = typeof req.query['search'] === 'string' ? req.query['search'].trim().toLocaleLowerCase() : '';
+  const rawCursor = typeof req.query['cursor'] === 'string' ? req.query['cursor'] : '';
+  let cursorId = '';
+  let cursorCreatedAt = 0;
+  if (rawCursor) {
+    try {
+      const cursor = JSON.parse(Buffer.from(rawCursor, 'base64url').toString('utf8')) as { id?: unknown; createdAt?: unknown; search?: unknown };
+      if (typeof cursor.id !== 'string' || typeof cursor.createdAt !== 'number' || cursor.search !== search) throw new Error('Invalid campaign history cursor.');
+      cursorId = cursor.id;
+      cursorCreatedAt = cursor.createdAt;
+    } catch {
+      return res.status(400).json({ error: 'The campaign history cursor is invalid. Restart the search and try again.' });
+    }
+  }
+
+  let query = db.collection('campaigns')
+    .where('ownerUid', '==', uidOf(req))
+    .orderBy('createdAt', 'desc')
+    .orderBy(FieldPath.documentId(), 'desc');
+  let page: FirebaseFirestore.QueryDocumentSnapshot[];
+  let hasMore: boolean;
+  if (!search) {
+    if (cursorId) query = query.startAfter(Timestamp.fromMillis(cursorCreatedAt), cursorId);
+    const snapshot = await query.limit(pageSize + 1).get();
+    page = snapshot.docs.slice(0, pageSize);
+    hasMore = snapshot.docs.length > pageSize;
+  } else {
+    const snapshot = await query.get();
+    const matches = snapshot.docs.filter(doc => {
+      const name = String(doc.get('name') ?? '').toLocaleLowerCase();
+      return name.includes(search) || doc.id.toLocaleLowerCase().includes(search);
+    });
+    let startAt = 0;
+    if (cursorId) {
+      const cursorIndex = matches.findIndex(doc => doc.id === cursorId);
+      if (cursorIndex < 0) return res.status(400).json({ error: 'The campaign history cursor is no longer valid. Restart the search and try again.' });
+      startAt = cursorIndex + 1;
+    }
+    page = matches.slice(startAt, startAt + pageSize);
+    hasMore = startAt + page.length < matches.length;
+  }
+  const last = page.at(-1);
+  const lastCreatedAt = last?.get('createdAt') as Timestamp | undefined;
+  const nextCursor = hasMore && last && lastCreatedAt
+    ? Buffer.from(JSON.stringify({ id: last.id, createdAt: lastCreatedAt.toMillis(), search })).toString('base64url')
+    : null;
+  res.json({ items: page.map(doc => ({ id: doc.id, ...doc.data() })), nextCursor });
+});
+
+/**
+ * Deletes the authenticated user's application records and Firebase Auth identity.
+ */
+app.delete(`${apiRoot}/account`, async (req: AuthedRequest, res) => {
+  const authorization = req.header('authorization')?.match(/^Bearer (.+)$/);
+  if (!authorization) return res.status(401).json({ error: 'Sign in again before deleting your account.' });
+  try {
+    const decoded = await verifyIdTokenWithNetworkRetry(authorization[1], true);
+    const ageSeconds = Math.floor(Date.now() / 1000) - decoded.auth_time;
+    if (decoded.uid !== uidOf(req) || ageSeconds < 0 || ageSeconds > 5 * 60) {
+      return res.status(401).json({ error: 'Please reauthenticate, then retry account deletion.' });
+    }
+  } catch (error) {
+    if (isFirebaseNetworkError(error)) {
+      res.setHeader('Retry-After', '2');
+      return res.status(503).json({
+        error: 'The API server cannot reach Firebase Auth to confirm account deletion.',
+        diagnostic: firebaseNetworkDiagnostic(error),
+      });
+    }
+    return res.status(401).json({ error: 'Please reauthenticate, then retry account deletion.' });
+  }
+  const uid = uidOf(req);
+  const [campaigns, subscribers, stats] = await Promise.all([
+    db.collection('campaigns').where('ownerUid', '==', uid).get(),
+    db.collection('subscribers').where('ownerUid', '==', uid).get(),
+    db.collection('stats').where('ownerUid', '==', uid).get(),
+  ]);
+  for (const campaign of campaigns.docs) await db.recursiveDelete(campaign.ref);
+  const writer = db.bulkWriter();
+  for (const doc of [...subscribers.docs, ...stats.docs]) writer.delete(doc.ref);
+  writer.delete(db.collection('settings').doc(uid));
+  await writer.close();
+  await getAuth(adminApp).deleteUser(uid);
+  res.sendStatus(204);
+});
+
 /**
  * Creates a campaign and starts an immediate custom-message campaign when appropriate.
  * @param req The authenticated request containing campaign setup and optional image data.
  * @param res The response receiving the new campaign document.
  * @returns Nothing; sends a created response or validation error.
  */
-app.post(`${apiRoot}/campaigns`, async (req: AuthedRequest, res) => {
+app.post(`${apiRoot}/campaigns`, limitCampaignCreates, async (req: AuthedRequest, res) => {
   const {name,templateName,language='en_US',audienceTags=[],scheduledAt,messageText,imageDataUrl,imageName='campaign-image'}=req.body ?? {};
-  if (typeof name !== 'string' || !name.trim()) return res.status(400).json({error:'Campaign name is required.'});
+  if (typeof name !== 'string' || !name.trim() || name.trim().length > 100) return res.status(400).json({error:'Campaign name is required and must be 100 characters or fewer.'});
   const cleanMessage = typeof messageText === 'string' ? messageText.trim() : '';
   const customMessage = Boolean(cleanMessage || imageDataUrl);
   if (customMessage && cleanMessage.length > (imageDataUrl ? 1024 : 4096)) return res.status(400).json({error:imageDataUrl?'Image captions must be 1,024 characters or fewer.':'Messages must be 4,096 characters or fewer.'});
   if (!customMessage && (typeof templateName !== 'string' || !templateName.trim())) return res.status(400).json({error:'A campaign message or approved template name is required.'});
   const scheduleDate=scheduledAt?new Date(scheduledAt):null;
   if(scheduleDate && Number.isNaN(scheduleDate.getTime()))return res.status(400).json({error:'scheduledAt must be a valid date.'});
+  if(scheduleDate && scheduleDate.getTime()<=Date.now())return res.status(400).json({error:'Choose a schedule time in the future.'});
   let imageMediaId: string | undefined;
   if (imageDataUrl) {
     if (typeof imageDataUrl !== 'string') return res.status(400).json({error:'The image upload is invalid.'});
@@ -267,6 +466,9 @@ app.post(`${apiRoot}/campaigns`, async (req: AuthedRequest, res) => {
     if (!match) return res.status(400).json({error:'Choose a JPEG or PNG image.'});
     const bytes = Buffer.from(match[2], 'base64');
     if (!bytes.length || bytes.length > 5 * 1024 * 1024) return res.status(400).json({error:'Images must be no larger than 5 MB.'});
+    const isPng = match[1] === 'image/png' && bytes.subarray(0, 8).equals(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]));
+    const isJpeg = match[1] === 'image/jpeg' && bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+    if (!isPng && !isJpeg) return res.status(400).json({error:'Image content must match its JPEG or PNG file type.'});
     try { imageMediaId = await uploadCampaignImage(uidOf(req), bytes, match[1], typeof imageName === 'string' ? imageName.slice(0, 128) : 'campaign-image'); }
     catch (error) { return res.status(502).json({error:error instanceof Error?error.message:'Image upload failed.'}); }
   }
@@ -319,8 +521,15 @@ const busyCampaigns = new Set<string>();
 async function runCampaign(ref: FirebaseFirestore.DocumentReference) {
   if (busyCampaigns.has(ref.id)) return; busyCampaigns.add(ref.id);
   try {
-    const snap=await ref.get(); const campaign=snap.data() as Campaign|undefined; if (!campaign || campaign.status!=='scheduled') return;
-    await ref.update({status:'sending',startedAt:now()});
+    const campaign=await db.runTransaction(async transaction=>{
+      const snap=await transaction.get(ref);
+      if(!snap.exists || snap.get('status')!=='scheduled')return undefined;
+      const scheduledAt=snap.get('scheduledAt') as Timestamp|undefined;
+      if(scheduledAt && scheduledAt.toMillis()>Date.now())return undefined;
+      transaction.update(ref,{status:'sending',startedAt:now()});
+      return snap.data() as Campaign;
+    });
+    if(!campaign)return;
     const subscribers=await db.collection('subscribers').where('ownerUid','==',campaign.ownerUid).where('optedIn','==',true).get();
     const targets=subscribers.docs.filter(doc=>!campaign.audienceTags.length || campaign.audienceTags.some(tag=>(doc.get('tags') as string[]|undefined)?.includes(tag)));
     for (const target of targets) {

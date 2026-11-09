@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 252 56" role="img" aria-labelledby="title">
+  <title id="title">Mweboard</title>
+  <defs>
+    <linearGradient id="g" x1="4" y1="3" x2="49" y2="51" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8886ff"/><stop offset="1" stop-color="#555ee8"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="52" height="52" rx="16" fill="url(#g)"/>
+  <path d="M12 39V17h7l9 11 9-11h7v22h-7V28l-9 10-9-10v11h-7Z" fill="#fff"/>
+  <circle cx="45" cy="13" r="3.5" fill="#b6f1db"/>
+  <text x="66" y="38" fill="#7777ff" font-family="Inter,Arial,sans-serif" font-size="25" font-weight="700" letter-spacing="-.7">Mweboard</text>
+</svg>
